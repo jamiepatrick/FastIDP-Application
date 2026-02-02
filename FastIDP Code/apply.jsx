@@ -11,7 +11,7 @@ import { createClient } from "@supabase/supabase-js"
 
 // Initialize Stripe
 const stripePromise = loadStripe(
-    "pk_live_51P8oMiRtjDxL2xZGkWFCL8C1rq0DoEVlt9b8kXwHWaPa3oDjoRenAvweDszsv2JyL3m8IrejE1MZ1pCZSjU2X7kW00e8wx2At9"
+    "pk_live_51P8oMiRtjDxL2xZGkWFCL8C1rqODoEVlt9b8kXwHWaPa3oDjoRenAvweDszsv2JyL3m8IrejE1MZ1pCZSjU2X7kW00e8wx2At9"
 )
 
 // Initialize Supabase client
@@ -475,6 +475,8 @@ const PaymentForm = ({
     onPaymentError,
     formData,
     onFieldChange,
+    onCouponValidated,
+    applicationId,
 }) => {
     const stripe = useStripe()
     const elements = useElements()
@@ -482,6 +484,13 @@ const PaymentForm = ({
     const [message, setMessage] = useState("")
     const [elementReady, setElementReady] = useState(false)
     const [sameAsShipping, setSameAsShipping] = useState(true)
+    const [couponState, setCouponState] = useState({
+        isValidating: false,
+        validated: false,
+        coupon: null,
+        couponCode: null,
+        error: null,
+    })
 
     // Calculate totals based on form selections
     const calculateTotals = useCallback(() => {
@@ -547,17 +556,33 @@ const PaymentForm = ({
         const subtotal = permitTotal + processingPrice
         const taxRate = 0.0775 // 7.75% tax rate for Bellefontaine, OH
         const taxAmount = Math.round(subtotal * taxRate * 100) / 100 // Round to 2 decimal places
-        const total = subtotal + taxAmount
+        const totalBeforeDiscount = subtotal + taxAmount
+
+        // Calculate discount if coupon is validated
+        let discountAmount = 0
+        if (couponState.validated && couponState.coupon) {
+            if (couponState.coupon.percent_off) {
+                // Percentage discount applied to subtotal + tax
+                discountAmount = Math.round(totalBeforeDiscount * (couponState.coupon.percent_off / 100) * 100) / 100
+            } else if (couponState.coupon.amount_off) {
+                // Fixed amount discount (in cents, convert to dollars)
+                discountAmount = couponState.coupon.amount_off / 100
+            }
+        }
+
+        const total = Math.max(0, totalBeforeDiscount - discountAmount)
 
         return {
             permitTotal,
             processingPrice,
             subtotal,
             taxAmount,
+            discountAmount,
+            totalBeforeDiscount,
             total,
             permitCount: formData.selectedPermits?.length || 0,
         }
-    }, [formData])
+    }, [formData, couponState])
 
     const totals = calculateTotals()
 
@@ -591,6 +616,82 @@ const PaymentForm = ({
         return country ? country.code : 'US'
     }
 
+    // Validate and apply coupon code
+    const handleApplyCoupon = async () => {
+        const couponCode = formData.promoCode?.trim()
+        
+            if (!couponCode) {
+            setMessage("") // Clear any previous messages
+            setCouponState({
+                isValidating: false,
+                validated: false,
+                coupon: null,
+                couponCode: null,
+                error: 'Please enter a promo code',
+            })
+            return
+        }
+
+        setMessage("") // Clear any previous messages
+        setCouponState(prev => ({ ...prev, isValidating: true, error: null }))
+
+        try {
+            const response = await fetch(
+                'https://fastidp.vercel.app/api/validate-coupon',
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ couponCode }),
+                }
+            )
+
+            const data = await response.json()
+
+            if (!response.ok || !data.valid) {
+                setMessage("") // Clear any previous messages
+                setCouponState({
+                    isValidating: false,
+                    validated: false,
+                    coupon: null,
+                    couponCode: null,
+                    error: data.error || 'Invalid coupon code',
+                })
+                return
+            }
+
+            // Coupon is valid
+            setMessage("") // Clear any previous payment error messages
+            setCouponState({
+                isValidating: false,
+                validated: true,
+                coupon: data.coupon,
+                couponCode: data.coupon.code, // Use coupon code from our system
+                error: null,
+            })
+            
+            // Store coupon code in formData
+            onFieldChange('couponCode', data.coupon.code)
+            
+            // Pass validated coupon info to parent
+            if (onCouponValidated) {
+                onCouponValidated({
+                    couponCode: data.coupon.code,
+                    coupon: data.coupon,
+                }, formData)
+            }
+        } catch (error) {
+            console.error('Coupon validation error:', error)
+            setMessage("") // Clear any previous messages
+            setCouponState({
+                isValidating: false,
+                validated: false,
+                coupon: null,
+                couponCode: null,
+                error: 'Failed to validate coupon. Please try again.',
+            })
+        }
+    }
+
     const handleSubmit = async (event) => {
         event.preventDefault()
 
@@ -599,10 +700,81 @@ const PaymentForm = ({
             return
         }
 
+        // If coupon was applied after payment intent was created, update the payment intent amount
+        // This way we don't need to recreate it and clear the payment fields
+        if (formData.couponCode && clientSecret && applicationId) {
+            try {
+                console.log('Coupon applied after payment intent creation, updating payment intent amount...')
+                const paymentIntentId = clientSecret.split("_secret_")[0]
+                
+                const updateResponse = await fetch(
+                    "https://fastidp.vercel.app/api/update-payment-intent",
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ 
+                            paymentIntentId: paymentIntentId,
+                            formData: formData,
+                        }),
+                    }
+                )
+                
+                if (updateResponse.ok) {
+                    const updateData = await updateResponse.json()
+                    console.log('Payment intent amount updated with discount')
+                    
+                    // Update clientSecret if provided (some updates return a new clientSecret)
+                    if (updateData.clientSecret && updateData.clientSecret !== clientSecret) {
+                        console.log('Updating clientSecret after payment intent update')
+                        setPaymentState(prev => ({
+                            ...prev,
+                            clientSecret: updateData.clientSecret,
+                        }))
+                        // Wait a moment for Elements to re-render with new clientSecret
+                        await new Promise(resolve => setTimeout(resolve, 500))
+                    }
+                } else {
+                    const errorText = await updateResponse.text()
+                    console.error('Failed to update payment intent amount:', updateResponse.status, errorText)
+                    // If update fails, try to recreate (this will clear fields but discount will be applied)
+                    const paymentResponse = await fetch(
+                        "https://fastidp.vercel.app/api/create-payment-intent",
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ 
+                            applicationId: applicationId, 
+                            formData: formData,
+                        }),
+                        }
+                    )
+                    
+                    if (paymentResponse.ok) {
+                        const { clientSecret: newClientSecret } = await paymentResponse.json()
+                        setPaymentState(prev => ({
+                            ...prev,
+                            clientSecret: newClientSecret,
+                        }))
+                        setMessage("Payment updated with discount. Please re-enter your payment information.")
+                        setIsProcessing(false)
+                        return
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating payment intent:', error)
+                // Continue with original payment intent
+            }
+        }
+
         setIsProcessing(true)
         setMessage("")
 
         try {
+            // Validate clientSecret before attempting confirmation
+            if (!clientSecret || !clientSecret.includes('_secret_')) {
+                throw new Error('Invalid payment setup. Please refresh the page and try again.')
+            }
+
             const countryCode = getCountryCode(formData.shippingCountry)
             
             const confirmParams = {
@@ -623,7 +795,21 @@ const PaymentForm = ({
                 }
             }
 
-            const { error } = await stripe.confirmPayment({
+            // Note: Discount is already applied to payment intent amount on creation
+            // Stripe doesn't support discounts parameter in confirmPayment
+            // Promotion code is tracked in payment intent metadata for redemption tracking
+
+            // Ensure Elements is properly mounted and ready
+            if (!elements) {
+                throw new Error('Payment form is not ready. Please wait a moment and try again.')
+            }
+
+            // Small delay to ensure Elements has fully initialized after any updates
+            await new Promise(resolve => setTimeout(resolve, 100))
+
+            // If we recreated the payment intent, we need to make sure Elements is using the new clientSecret
+            // The Elements component should have re-mounted with the new clientSecret
+            const { error, paymentIntent } = await stripe.confirmPayment({
                 elements,
                 confirmParams,
                 redirect: "if_required",
@@ -631,19 +817,41 @@ const PaymentForm = ({
 
             if (error) {
                 console.error("Payment error:", error)
-                setMessage(error.message)
-                onPaymentError(error.message)
+                // If error is about clientSecret mismatch, the Elements might not have updated yet
+                if (error.message?.includes('client_secret') || error.message?.includes('No such payment_intent')) {
+                    setMessage("Payment form updating with discount. Please try again in a moment.")
+                } else {
+                    setMessage(error.message || "Payment failed. Please try again.")
+                }
+                onPaymentError(error.message || "Payment failed")
             } else {
-                const paymentIntentId = clientSecret.split("_secret_")[0]
+                // Use paymentIntent.id if available, otherwise parse from clientSecret
+                const paymentIntentId = paymentIntent?.id || clientSecret.split("_secret_")[0]
+                console.log('Payment confirmed successfully:', paymentIntentId)
                 onPaymentSuccess(paymentIntentId)
             }
         } catch (err) {
             console.error("Payment confirmation failed:", err)
-            setMessage("Payment failed. Please try again.")
-            onPaymentError(err.message)
+            console.error("Error details:", {
+                message: err.message,
+                type: err.type,
+                code: err.code,
+                stack: err.stack
+            })
+            
+            // Handle specific error types
+            let errorMessage = "Payment failed. Please try again."
+            if (err.message?.includes('client_secret') || err.message?.includes('No such payment_intent')) {
+                errorMessage = "Payment form is not ready. Please refresh the page and try again."
+            } else if (err.message) {
+                errorMessage = err.message
+            }
+            
+            setMessage(errorMessage)
+            onPaymentError(errorMessage)
+        } finally {
+            setIsProcessing(false)
         }
-
-        setIsProcessing(false)
     }
 
     return (
@@ -694,6 +902,20 @@ const PaymentForm = ({
                         <span>Tax (7.75%)</span>
                         <span className="summary-price">${totals.taxAmount.toFixed(2)}</span>
                     </div>
+
+                    {/* Discount (if applied) */}
+                    {totals.discountAmount > 0 && (
+                        <div className="summary-item" style={{ color: '#059669' }}>
+                            <span>
+                                Discount {couponState.validated && couponState.coupon?.percent_off 
+                                    ? `(${couponState.coupon.percent_off}% off)`
+                                    : ''}
+                            </span>
+                            <span className="summary-price" style={{ color: '#059669' }}>
+                                -${totals.discountAmount.toFixed(2)}
+                            </span>
+                        </div>
+                    )}
 
                     <div className="summary-item total">
                         <span>Total</span>
@@ -783,18 +1005,84 @@ const PaymentForm = ({
                 </div>
 
                 <div className="form-group">
-                    <FormField
-                        label="Promo Code"
-                        name="promoCode"
-                        type="text"
-                        placeholder="Enter promo code (optional)"
-                        value={formData.promoCode}
-                        onChange={onFieldChange}
-                        fieldClass=""
-                    />
+                    <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', fontWeight: '500', color: '#374151' }}>
+                        Promo Code
+                    </label>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <input
+                            type="text"
+                            name="promoCode"
+                            placeholder="Enter promo code (optional)"
+                            value={formData.promoCode || ''}
+                            onChange={(e) => {
+                                const value = e.target.value
+                                // Update form data
+                                onFieldChange('promoCode', value, e)
+                                // Clear validation state when user types
+                                if (couponState.validated || couponState.error) {
+                                    setCouponState({
+                                        isValidating: false,
+                                        validated: false,
+                                        coupon: null,
+                                        couponCode: null,
+                                        error: null,
+                                    })
+                                    // Also clear the validated coupon code from formData
+                                    if (formData.couponCode) {
+                                        onFieldChange('couponCode', null, e)
+                                    }
+                                }
+                            }}
+                            style={{
+                                flex: 1,
+                                padding: '10px 12px',
+                                fontSize: '14px',
+                                border: '1px solid #d1d5db',
+                                borderRadius: '6px',
+                                outline: 'none',
+                                height: '42px',
+                                boxSizing: 'border-box',
+                            }}
+                            onKeyPress={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault()
+                                    handleApplyCoupon()
+                                }
+                            }}
+                            disabled={couponState.isValidating || couponState.validated}
+                        />
+                        <button
+                            type="button"
+                            onClick={handleApplyCoupon}
+                            disabled={couponState.isValidating || couponState.validated || !formData.promoCode?.trim()}
+                            className="btn secondary"
+                            style={{
+                                padding: '10px 20px',
+                                whiteSpace: 'nowrap',
+                                height: '42px',
+                                boxSizing: 'border-box',
+                                opacity: (couponState.isValidating || couponState.validated || !formData.promoCode?.trim()) ? 0.6 : 1,
+                                cursor: (couponState.isValidating || couponState.validated || !formData.promoCode?.trim()) ? 'not-allowed' : 'pointer',
+                            }}
+                        >
+                            {couponState.isValidating ? 'Validating...' : couponState.validated ? 'Applied' : 'Apply'}
+                        </button>
+                    </div>
+                    {/* Show error OR success message, not both */}
+                    {couponState.error && (
+                        <div style={{ marginTop: '8px', fontSize: '13px', color: '#dc2626' }}>
+                            {couponState.error}
+                        </div>
+                    )}
+                    {!couponState.error && couponState.validated && couponState.coupon && (
+                        <div style={{ marginTop: '8px', fontSize: '13px', color: '#059669' }}>
+                            ✅ Promo code applied: {couponState.coupon.percent_off ? `${couponState.coupon.percent_off}% off` : couponState.coupon.amount_off ? `$${(couponState.coupon.amount_off / 100).toFixed(2)} off` : 'Coupon applied'}
+                        </div>
+                    )}
                 </div>
 
-                {message && <div className="error-message">{message}</div>}
+                {/* Only show payment error messages (not coupon messages) */}
+                {message && !couponState.error && <div className="error-message">{message}</div>}
                 <button
                     type="submit"
                     disabled={!stripe || !elements || isProcessing}
@@ -815,6 +1103,9 @@ const StripePaymentWrapper = ({
     onPaymentError,
     formData,
     onFieldChange,
+    paymentState,
+    setPaymentState,
+    onCouponValidated,
 }) => {
     const [stripeOptions, setStripeOptions] = useState(null)
 
@@ -833,6 +1124,12 @@ const StripePaymentWrapper = ({
                 },
             })
         }
+    }, [clientSecret])
+
+    // Store latest clientSecret in ref to avoid closure issues
+    const clientSecretRef = useRef(clientSecret)
+    useEffect(() => {
+        clientSecretRef.current = clientSecret
     }, [clientSecret])
 
     if (!stripeOptions) {
@@ -857,6 +1154,8 @@ const StripePaymentWrapper = ({
                     onPaymentError={onPaymentError}
                     formData={formData}
                     onFieldChange={onFieldChange}
+                    onCouponValidated={onCouponValidated}
+                    applicationId={paymentState?.applicationId}
                 />
             </Elements>
         </div>
@@ -1127,8 +1426,9 @@ export default function MultistepForm() {
         useSameAsShipping: true, // Use shipping address as billing address (default checked)
         billingZipCode: "", // Custom billing ZIP if different from shipping
 
-        // Promo code for payment
+                    // Promo code for payment
         promoCode: "",
+        couponCode: null, // Stores validated coupon code
     })
 
     // File upload state for Step 2
@@ -1147,6 +1447,12 @@ export default function MultistepForm() {
         paymentIntentId: null,
         isComplete: false,
     })
+    
+    // Ref to track latest paymentState for callbacks
+    const paymentStateRef = useRef(paymentState)
+    useEffect(() => {
+        paymentStateRef.current = paymentState
+    }, [paymentState])
 
     // Validation errors for all fields
     const [fieldErrors, setFieldErrors] = useState({})
@@ -2675,7 +2981,8 @@ export default function MultistepForm() {
                 )
             }
 
-            const { clientSecret } = await paymentResponse.json()
+            const paymentData = await paymentResponse.json()
+            const { clientSecret } = paymentData
             console.log("Payment intent created successfully")
 
             setPaymentState((prev) => ({
@@ -2700,6 +3007,7 @@ export default function MultistepForm() {
             console.log("Payment successful, updating database...", {
                 paymentIntentId,
                 applicationId: paymentState.applicationId,
+                isFreeOrder: paymentIntentId === null,
             })
 
             // Only proceed if this is the first time we're handling this payment
@@ -2707,6 +3015,7 @@ export default function MultistepForm() {
                 console.log("Payment already processed, skipping")
                 return
             }
+
 
             // Stripe will automatically trigger the webhook when payment succeeds
             // No need for manual webhook call - it causes duplicates
@@ -2726,6 +3035,30 @@ export default function MultistepForm() {
             ...prev,
             error,
         }))
+    }, [])
+
+    // Handle coupon validation - store in formData, discount will be applied when payment intent is created
+    const handleCouponValidated = useCallback(async (couponInfo, currentFormData) => {
+        console.log('handleCouponValidated called with:', couponInfo)
+        
+        // Store validated coupon in formData
+        setFormData(prev => ({
+            ...prev,
+            couponCode: couponInfo.couponCode,
+        }))
+        
+        // Get current state from ref
+        const currentPaymentState = paymentStateRef.current
+        
+        // If payment intent already exists, we can't apply discount without recreating
+        // which would clear payment fields. So we'll just store the coupon code
+        // and it will be used if payment intent needs to be recreated on submit
+        if (currentPaymentState.clientSecret && currentPaymentState.applicationId) {
+            console.log('Payment intent already created. Discount is stored and will be shown in order summary.')
+            console.log('Note: To apply discount to payment, refresh the page or it will be applied on next payment attempt.')
+        } else {
+            console.log('Payment intent not yet created, discount will be applied when payment intent is created')
+        }
     }, [])
 
     // Navigation handlers
@@ -4801,6 +5134,9 @@ export default function MultistepForm() {
                                 onPaymentError={handlePaymentError}
                                 formData={formData}
                                 onFieldChange={handleFieldChange}
+                                paymentState={paymentState}
+                                setPaymentState={setPaymentState}
+                                onCouponValidated={(couponInfo, formDataArg) => handleCouponValidated(couponInfo, formDataArg || formData)}
                             />
                         ) : (
                             <div className="payment-loading">

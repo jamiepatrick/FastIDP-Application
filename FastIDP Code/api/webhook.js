@@ -1365,10 +1365,10 @@ async function triggerMakeAutomation(applicationId, formDataString, paymentInten
           }
         })(),
         parcel: {
-          length: 4,    // IDP document size
-          width: 6,
+          length: 9.5,    // Letter envelope size (inches)
+          width: 12.5,
           height: 0.1,
-          weight: 8     // 0.5 lb = 8 oz for IDP document
+          weight: 2     // 2 oz for IDP document
         },
         // Customs information (REQUIRED for international shipments)
         // Only include for international shipping category
@@ -1386,7 +1386,7 @@ async function triggerMakeAutomation(applicationId, formDataString, paymentInten
               description: 'International Driving Permit',
               quantity: 1,
               value: 0.01, // Minimal value for customs (documents have low/no commercial value)
-              weight: 8, // Weight in ounces
+              weight: 2, // Weight in ounces
               hs_tariff_number: '49019900', // HS code for printed documents
               origin_country: 'US'
             }

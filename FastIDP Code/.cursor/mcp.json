@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp/"
+    },
+    "vercel": {
+      "url": "https://mcp.vercel.com/jamie-patricks-projects/fastidp"
+    },
+    "supabase": {
+      "url": "https://mcp.supabase.com/mcp?project_ref=cmcqbucqtodfeemdcion&read_only=true"
+    }
+  }
+}
