@@ -1,5 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
+import { readFileSync } from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { PERMIT_PRICES, getCombinedPrice, getSpeedDisplayName, STRIPE_PRODUCTS } from '../config/pricing.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Initialize Supabase client
 const supabase = createClient(
@@ -141,31 +146,7 @@ async function uploadFilesToStorage(files, applicationId, fileType) {
 
 // Stripe product mapping imported from config/pricing.js
 
-// Countries that can be processed automatically through EasyPost
-const AUTOMATED_COUNTRIES = [
-  'AU', // Australia
-  'AT', // Austria
-  'BE', // Belgium
-  'CA', // Canada
-  'DK', // Denmark
-  'FI', // Finland
-  'FR', // France
-  'DE', // Germany
-  'IE', // Ireland
-  'IT', // Italy
-  'LU', // Luxembourg
-  'MX', // Mexico
-  'NL', // Netherlands
-  'NZ', // New Zealand
-  'NO', // Norway
-  'PT', // Portugal
-  'ES', // Spain
-  'SE', // Sweden
-  'CH', // Switzerland
-  'GB', // United Kingdom
-]
-
-// Country name to code mapping for parsing international addresses
+// Country name to code mapping for parsing international addresses (used by CSV and address parsing)
 const COUNTRY_NAME_TO_CODE = {
   // Automated countries - full names to codes
   'australia': 'AU',
@@ -201,6 +182,33 @@ const COUNTRY_NAME_TO_CODE = {
   'united states of america': 'US',
   'america': 'US',
 }
+
+// Load automated country codes from data/countries-automation.csv (source of truth)
+const FALLBACK_AUTOMATED_COUNTRIES = ['AU', 'AT', 'BE', 'CA', 'DK', 'FI', 'FR', 'DE', 'IE', 'IT', 'LU', 'MX', 'NL', 'NZ', 'NO', 'PT', 'ES', 'SE', 'CH', 'GB']
+
+function getAutomatedCountryCodes() {
+  try {
+    const csvPath = path.join(__dirname, '..', 'data', 'countries-automation.csv')
+    const raw = readFileSync(csvPath, 'utf-8')
+    const lines = raw.split(/\r?\n/).filter(line => line.trim())
+    const codes = []
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i]
+      const parts = line.split(',')
+      const yesCol = (parts.pop() || '').trim().toLowerCase()
+      const countryName = parts.join(',').trim().replace(/^"|"$/g, '')
+      if (yesCol !== 'yes') continue
+      const code = COUNTRY_NAME_TO_CODE[countryName.toLowerCase()]
+      if (code) codes.push(code)
+    }
+    return codes.length > 0 ? codes : FALLBACK_AUTOMATED_COUNTRIES
+  } catch (err) {
+    console.warn('Could not load countries-automation.csv, using fallback list:', err.message)
+    return FALLBACK_AUTOMATED_COUNTRIES
+  }
+}
+
+const AUTOMATED_COUNTRIES = getAutomatedCountryCodes()
 
 // Helper function to extract country from international address
 function extractCountryFromAddress(internationalFullAddress) {
