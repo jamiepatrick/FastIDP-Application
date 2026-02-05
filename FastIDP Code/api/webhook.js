@@ -1,5 +1,6 @@
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
+import { getShippingCarrierAndService } from '../config/shipping-services.js'
 
 // Country name to code mapping for normalizing country codes
 const COUNTRY_NAME_TO_CODE = {
@@ -906,14 +907,6 @@ async function triggerMakeAutomation(applicationId, formDataString, paymentInten
       return 8
     }
 
-    // Determine carrier based on shipping category
-    const getCarrier = (category) => {
-      if (category === 'military') {
-        return 'USPS' // Only USPS can deliver to military bases
-      }
-      return null // Let EasyPost choose best carrier for domestic/international
-    }
-
     // Prepare comprehensive data for Make.com business workflow
     console.log('Building automationData object...')
     let automationData
@@ -1394,8 +1387,18 @@ async function triggerMakeAutomation(applicationId, formDataString, paymentInten
         } : null,
         // Speed requirement for EasyPost to filter rates
         max_delivery_days: getShippingSpeedDays(formData.processingOption, formData.shippingCategory),
-        // Carrier specification (USPS required for military)
-        carrier: getCarrier(formData.shippingCategory),
+        // Carrier and service from SHIPPING_SPEC / config (FedEx domestic & automated international, USPS military)
+        ...(function () {
+          const { carrier, requested_service } = getShippingCarrierAndService(
+            formData.shippingCategory,
+            formData.processingOption,
+            fulfillmentType || 'manual'
+          )
+          const out = {}
+          if (carrier) out.carrier = carrier
+          if (requested_service) out.requested_service = requested_service
+          return out
+        })(),
         options: {
           label_format: 'PDF',
           label_size: '4x6'

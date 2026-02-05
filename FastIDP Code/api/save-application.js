@@ -345,10 +345,7 @@ function determineFulfillmentType(shippingCategory, shippingCountry, internation
       automatedCountries: AUTOMATED_COUNTRIES
     })
     
-    // TEMPORARY PATCH: Disable automation for all international countries
-    // TODO: Re-enable automation by uncommenting line below and removing 'manual' return
-    // return isAutomated ? 'automated' : 'manual'
-    return 'manual' // Force manual for all international shipments temporarily
+    return isAutomated ? 'automated' : 'manual'
   }
   
   // Default to manual if category is unknown
