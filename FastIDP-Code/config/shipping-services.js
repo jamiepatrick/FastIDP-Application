@@ -1,20 +1,20 @@
 /**
  * Shipping carrier and EasyPost service by category, speed, and fulfillment.
- * See SHIPPING_SPEC.md. Service strings must match EasyPost rate objects
- * (verify from a real Create Shipment response and update if needed).
+ * See SHIPPING_SPEC.md. Service strings must match EasyPost rate object `service` field exactly.
+ * FedEx: https://www.easypost.com/fedex-guide | USPS: https://www.easypost.com/usps-guide
  */
 
-// EasyPost service names (carrier-specific)
+// EasyPost service names — must match rate.service from EasyPost API
 const FEDEX_SERVICES = {
-  fastest: 'FedEx Priority Overnight',
-  fast: 'FedEx 2Day',
-  standard: 'FedEx 2Day'
+  fastest: 'PRIORITY_OVERNIGHT',
+  fast: 'FEDEX_2_DAY',
+  standard: 'FEDEX_2_DAY'
 }
-const FEDEX_INTERNATIONAL = 'FedEx International Priority'
+const FEDEX_INTERNATIONAL = 'FEDEX_INTERNATIONAL_PRIORITY'
 const USPS_SERVICES = {
-  fastest: 'Priority Express',
-  fast: 'Priority Express',
-  standard: 'Priority'
+  fastest: 'Express',      // Priority Mail Express
+  fast: 'Express',
+  standard: 'Priority'     // Priority Mail
 }
 
 /**
